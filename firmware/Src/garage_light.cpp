@@ -38,21 +38,34 @@ GarageLight::~GarageLight()
 
 void GarageLight::run()
 {
+	uint32_t onTime = HAL_GetTick() - mSwitchTime;
+
 	if(mLightState != mRequestState)
 	{
-		uint32_t onTime = HAL_GetTick() - mSwitchTime;
-
 		if(isDay())
 		{
 			printf("It is day, switching light off\n");
 			mSetLight(false);
 			mLightState = false;
+			mRequestState = mLightState;
 		}
 
-		//only when light has been on for 1 min, turn it off
-		if(onTime > 60000)
+		//only when light has been on for 1.5 min, turn it off
+		if(onTime > 90000)
 		{
 			printf("Light has been on for longer than %d ms\n", (int)onTime);
+			mSetLight(false);
+			mLightState = false;
+			mRequestState = mLightState;
+		}
+	}
+
+	//only when light has been on for 5 min, turn it off anyways
+	if(mLightState)
+	{
+		if(onTime > 300000)
+		{
+			printf("Light has been on for too long (%d ms)\n", (int)onTime);
 			mSetLight(false);
 			mLightState = false;
 			mRequestState = mLightState;
@@ -85,13 +98,14 @@ void GarageLight::setDoor(bool open)
 	else
 	{
 		uint32_t onTime = HAL_GetTick() - mSwitchTime;
-		printf("Light has been on for %d ms\n", (int)onTime);
 
-		//only when light has been on for 1 min, turn it off
-		if(onTime > 60000)
+		//only when light has been on for 1.5 min, turn it off
+		if(onTime > 90000)
 		{
+			printf("Light has been on for %d ms\n", (int)onTime);
 			mSetLight(false);
 			mLightState = false;
 		}
 	}
+
 }
