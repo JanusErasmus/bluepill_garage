@@ -17,8 +17,7 @@ class InterfaceNRF24
 	nRF24cb nrf_cb;
 	static SPI_HandleTypeDef *mSPI;
 	uint32_t mPacketsLost;
-	int mNetAddressLen;
-	uint8_t mNetAddress[5];
+	uint8_t mNetAddress[8];
 
 	bool (*receivedCB)(int pipe, uint8_t *data, int len);
 

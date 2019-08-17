@@ -86,11 +86,9 @@ void printPipes()
 InterfaceNRF24::InterfaceNRF24(SPI_HandleTypeDef *spi_handle, uint8_t *net_addr, int len)
 {
 	mPacketsLost = 0;
-	mNetAddressLen = len;
-	uint8_t temp_addr[5];
-	memcpy(temp_addr, net_addr, len);
-	memcpy(mNetAddress, net_addr, len);
 	mSPI = spi_handle;
+
+	memcpy(mNetAddress, net_addr, 8);
 
 	nrf_cb.nRF24_T = nrf_t;
 	nrf_cb.nRF24_CSN_L = nrf_cs_l;
@@ -115,27 +113,7 @@ InterfaceNRF24::InterfaceNRF24(SPI_HandleTypeDef *spi_handle, uint8_t *net_addr,
 
 	// Configure RX PIPES
 	nRF24_SetAddr(nRF24_PIPE0, net_addr);
-	nRF24_SetRXPipe(nRF24_PIPE0	, nRF24_AA_ON, 16); // Auto-ACK: enabled, payload length: 10 bytes
-
-	temp_addr[0] = 0xFF		;
-	nRF24_SetAddr(nRF24_PIPE1, temp_addr); // program address for pipe
-	nRF24_SetRXPipe(nRF24_PIPE1	, nRF24_AA_ON, 16); // Auto-ACK: enabled, payload length: 10 bytes
-//
-//	temp_addr[0] = 0x02;
-//	nRF24_SetAddr(nRF24_PIPE2, temp_addr); // program address for pipe
-//	nRF24_SetRXPipe(nRF24_PIPE2, nRF24_AA_ON, 16); // Auto-ACK: enabled, payload length: 10 bytes
-//
-//	temp_addr[0] = 0x03;
-//	nRF24_SetAddr(nRF24_PIPE3, temp_addr); // program address for pipe
-//	nRF24_SetRXPipe(nRF24_PIPE3, nRF24_AA_ON, 16); // Auto-ACK: enabled, payload length: 10 bytes
-//
-//	temp_addr[0] = 0x04;
-//	nRF24_SetAddr(nRF24_PIPE4, temp_addr); // program address for pipe
-//	nRF24_SetRXPipe(nRF24_PIPE4, nRF24_AA_ON, 16); // Auto-ACK: enabled, payload length: 10 bytes
-//
-//	temp_addr[0] = 0x05;
-//	nRF24_SetAddr(nRF24_PIPE5, temp_addr); // program address for pipe
-//	nRF24_SetRXPipe(nRF24_PIPE5, nRF24_AA_ON, 16); // Auto-ACK: enabled, payload length: 10 bytes
+	nRF24_SetRXPipe(nRF24_PIPE0	, nRF24_AA_OFF, 32);
 
 	// Set TX power for Auto-ACK (maximum, to ensure that transmitter will hear ACK reply)
 	nRF24_SetTXPower(nRF24_TXPWR_0dBm);
@@ -175,12 +153,13 @@ nRF24_TXResult InterfaceNRF24::transmitPacket(uint8_t *pBuf, uint8_t length)
 
 	// Deassert the CE pin (in case if it still high)
 	nrf_ce_l();
+	HAL_Delay(1);
 
 	// Transfer a data from the specified buffer to the TX FIFO
 	nRF24_WritePayload(pBuf, length);
+	HAL_Delay(100);
 
 	// Start a transmission by asserting CE pin (must be held at least 10us)
-	HAL_Delay(100 * (mNetAddress[0] + 1));
 	nrf_ce_h();
 	HAL_Delay(1);
 
@@ -203,7 +182,7 @@ nRF24_TXResult InterfaceNRF24::transmitPacket(uint8_t *pBuf, uint8_t length)
 	}
 
 	// Check the flags in STATUS register
-	printf(" - Status: %02X\n", status);
+	//printf(" - Status: %02X\n", status);
 
 	if (status & nRF24_FLAG_MAX_RT) {
 		// Auto retransmit counter exceeds the programmed maximum limit (FIFO is not removed)
@@ -229,14 +208,11 @@ int InterfaceNRF24::transmit(uint8_t *addr, uint8_t *payload, uint8_t length)
 
     // Configure TX PIPE
     nRF24_SetAddr(nRF24_PIPETX, addr); // program TX address
-	nRF24_SetAddr(nRF24_PIPE0, addr); // program address for pipe to receive ACK
 
-    printf("ADDR: \n");
-    diag_dump_buf(addr, 3);
+    printf("InterfaceNRF24: TX[0x%02X] %d: \n", addr[0], length);
 
-	// Print a payload
-	printf("TX  : %d\n", (int)length);
-	diag_dump_buf(payload, length);
+	//printf("TX  : %d\n", (int)length);
+	//diag_dump_buf(payload, length);
 
 	// Transmit a packet
 	nRF24_SetOperationalMode(nRF24_MODE_TX);
@@ -244,7 +220,7 @@ int InterfaceNRF24::transmit(uint8_t *addr, uint8_t *payload, uint8_t length)
 	nRF24_TXResult tx_res = transmitPacket(payload, length);
 	uint8_t otx = nRF24_GetRetransmitCounters();
 	uint8_t otx_plos_cnt = (otx & nRF24_MASK_PLOS_CNT) >> 4; // packets lost counter
-	uint8_t otx_arc_cnt  = (otx & nRF24_MASK_ARC_CNT); // auto retransmissions counter
+	//uint8_t otx_arc_cnt  = (otx & nRF24_MASK_ARC_CNT); // auto retransmissions counter
 	switch (tx_res) {
 	case nRF24_TX_SUCCESS:
 		printf(GREEN(" - OK\n"));
@@ -266,16 +242,18 @@ int InterfaceNRF24::transmit(uint8_t *addr, uint8_t *payload, uint8_t length)
 		tx_length = -3;
 		break;
 	}
-	printf(" - ARC= %d LOST= %d\n", (int)otx_arc_cnt, (int)mPacketsLost);
+	//printf(" - ARC= %d LOST= %d\n", (int)otx_arc_cnt, (int)mPacketsLost);
 
 	//	// Clear pending IRQ flags
-	    nRF24_ClearIRQFlags();
-	    nRF24_GetStatus();
+	nRF24_ClearIRQFlags();
+	nRF24_GetStatus();
+
+    HAL_Delay(100);
+    nRF24_SetAddr(nRF24_PIPE0, mNetAddress); // program RX address
+    HAL_Delay(100);
 
 	// Set operational mode (PRX == receiver)
 	nRF24_SetOperationalMode(nRF24_MODE_RX);
-
-	nRF24_SetAddr(nRF24_PIPE0, mNetAddress); // reset address to receive data on PIPE0
 
 	return tx_length;
 }

@@ -1,8 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-void
-diag_vdump_buf_with_offset(
+void diag_vdump_buf_with_offset(
       uint8_t    *p,
       uint32_t   s,
       uint8_t    *base
