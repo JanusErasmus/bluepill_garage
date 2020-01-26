@@ -55,6 +55,7 @@
 #include "Utils/crc.h"
 #include "Utils/terminal_serial.h"
 #include "stm32f1xx_hal.h"
+#include "iwdg.h"
 
 #include "Utils/terminal.h"
 #include "Utils/utils.h"
@@ -72,9 +73,11 @@
 #define WATER_NODE_ADDRESS      0x06
 
 #define NODE_ADDRESS GARAGE_NODE_ADDRESS
+#define MINIMUM_REPORT_RATE 600000// 1800000
 
 uint8_t netAddress[] = {0x23, 0x1B, 0x25};
 uint8_t serverAddress[] = {0x12, 0x3B, 0x45};
+static uint32_t last_sent_sample = 0;
 
 /* Private variables ---------------------------------------------------------*/
 RTC_HandleTypeDef hrtc;
@@ -146,102 +149,69 @@ RollingDoor leftDoor("L", sampleLeft);
 RollingDoor rightDoor("R", sampleRight);
 GarageLight light(setLight);
 
-uint32_t getADCstep()
+void sampleAnalog(double &temperature, double *voltages)
 {
-	uint32_t adc = 0;
-	ADC_ChannelConfTypeDef sConfig;
-	sConfig.Channel = ADC_CHANNEL_VREFINT;
-	sConfig.Rank = ADC_REGULAR_RANK_1;
-	sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
-	if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-	{
-		_Error_Handler(__FILE__, __LINE__);
-	}
-
-	HAL_ADC_Start(&hadc1);
-	if(HAL_ADC_PollForConversion(&hadc1, 1000) == HAL_OK)
-	{
-		adc = HAL_ADC_GetValue(&hadc1);
-		//printf("REF	: %d\n", adc);
-	}
-	HAL_ADC_Stop(&hadc1);
-
-	//this amount of steps measure 1.2V
-	uint32_t step = 1200000000 / adc;
-	printf("step %d\n", (int)step);
-	return step;
-}
-
-uint32_t sampleTemperature()
-{
-	uint32_t adc = 0;
-
-	ADC_ChannelConfTypeDef sConfig;
-  sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-	HAL_ADC_Start(&hadc1);
-	if(HAL_ADC_PollForConversion(&hadc1, 1000) == HAL_OK)
-	{
-		adc = HAL_ADC_GetValue(&hadc1);
-		//printf("ADC: %d\n", adc);
-	}
-	HAL_ADC_Stop(&hadc1);
-
-
-	return adc;
-}
-
-uint32_t getTemperature()
-{
-	uint32_t sum = 0;
+	uint32_t adc[8] = {};
 
 	HAL_ADCEx_Calibration_Start(&hadc1);
 
-	for (int k = 0; k < 8; ++k) {
-		sum += sampleTemperature();
-	}
+		for(int k = 0; k < 3; k++)
+		{
+			HAL_ADC_Start(&hadc1);
+			if(HAL_ADC_PollForConversion(&hadc1, 1000) == HAL_OK)
+			{
+				adc[k] += HAL_ADC_GetValue(&hadc1);
+				//printf("ADC: %d\n", adc);
+			}
+		}
 
-	uint32_t adc = sum >> 3;
-	printf("adc: %d\n" , (int)adc);
-	int voltage = adc * getADCstep();//845666; //x10^9
-	//printf(" *	%d\n", voltage);
-	voltage = 1.43e9 - voltage;
+	HAL_ADC_Stop(&hadc1);
+
+	//this amount of steps measure 1.2V
+	double step = 1.2 / adc[0];
+	//printf("ADC Step %0.3f\n", step);
+
+	double voltage = ((double)adc[1]) * step;
+	//printf(" *	%d\n", (int)voltage);
+	voltage = 1.43 - voltage;
 	//printf(" -	%d\n", voltage);
-	voltage /= 4.3e3;
+	voltage /= 0.0043;
 	//printf(" /	%d\n", voltage);
+	temperature = (25.0 + voltage) - 11;
 
-	uint32_t temp = 25000 + voltage;
-	printf("temp: %d\n", (int)temp);
-	return temp;
+	//measure raw voltage
+	voltages[0] = (((double)adc[2] * step));
 }
 
-void report(uint8_t *address)
+void report(uint8_t *address, bool sample)
 {
 //	printf("NOT reporting\n");
 	nodeData_s pay;
 	memset(&pay, 0, 32);
 	pay.nodeAddress = NODE_ADDRESS;
 	pay.timestamp = HAL_GetTick();
-	pay.temperature = getTemperature();
+
+	double temp, voltage;
+	sampleAnalog(temp, &voltage);
+	pay.temperature = ((100 * voltage) - 273) * 1000;
 
 	//report gate status in voltages[0-1]
 	pay.voltages[0] = leftDoor.getState();
 	pay.voltages[1] = rightDoor.getState();
+
+	if(sample)
+		pay.inputs |= 0x02;
+
 	pay.crc = CRC_8::crc((uint8_t*)&pay, 31);
 
 	//report status in voltages[0-1]
 	printf("TX result %d\n", InterfaceNRF24::get()->transmit(address, (uint8_t*)&pay, 32));
+	last_sent_sample = HAL_GetTick() + MINIMUM_REPORT_RATE;
 }
 
-void reportNow()
+void reportNow(bool sample)
 {
-	report(serverAddress);
+	report(serverAddress, sample);
 }
 
 bool NRFreceivedCB(int pipe, uint8_t *data, int len)
@@ -336,6 +306,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_IWDG_Init();
 
   HAL_Delay(1000);
 
@@ -388,7 +359,7 @@ int main(void)
 	  terminal_run();
 	  if(leftDoor.run() || rightDoor.run())
 	  {
-		reportNow();
+		reportNow(false);
 	  }
 
 	  light.run();
@@ -397,12 +368,26 @@ int main(void)
 	  {
 		  //before transmitting wait 200 ms intervals of node address
 		  HAL_Delay(200 + (NODE_ADDRESS * 200));
-		  reportNow();
+		  reportNow(false);
 		  reportToServer = false;
 	  }
 
       HAL_Delay(100);
       HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+      MX_IWDG_Refresh();
+
+      if(last_sent_sample < HAL_GetTick())
+      {
+    	  last_sent_sample = HAL_GetTick() + MINIMUM_REPORT_RATE;
+    	  reportNow(true);
+      }
+
+      //reset node every 3.14 hours
+      if(HAL_GetTick() > 11304000) // (3.14 * 3600 * 1000)
+      {
+    		printf("House keeping reboot...\n");
+    	    NVIC_SystemReset();
+      }
   }
 
 }
@@ -587,6 +572,11 @@ static void MX_GPIO_Init(void)
 	HAL_GPIO_Init(LIGHT_OUT_Port, &GPIO_InitStruct);
 	HAL_GPIO_WritePin(LIGHT_OUT_Port, LIGHT_OUT_Pin, GPIO_PIN_SET);
 
+	/*Configure GPIO pin : ADC12_IN0 */
+	GPIO_InitStruct.Pin = GPIO_PIN_0;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
 	/*Configure DOOR pin :  */
 	GPIO_InitStruct.Pin = LEFT_DOOR_IN_OPEN_Pin;
@@ -639,16 +629,42 @@ static void MX_SPI1_Init(void)
 /* ADC1 init function */
 static void MX_ADC1_Init(void)
 {
-  hadc1.Instance = ADC1;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE	;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+	hadc1.Instance = ADC1;
+	hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+	hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE	;
+	hadc1.Init.DiscontinuousConvMode = ENABLE;
+	hadc1.Init.ContinuousConvMode = DISABLE;
+	hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+	hadc1.Init.NbrOfDiscConversion = 1;
+	hadc1.Init.NbrOfConversion = 3;
+	if (HAL_ADC_Init(&hadc1) != HAL_OK)
+	{
+		_Error_Handler(__FILE__, __LINE__);
+	}
+
+  ADC_ChannelConfTypeDef sConfig;
+  sConfig.Channel = ADC_CHANNEL_VREFINT;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
-    _Error_Handler(__FILE__, __LINE__);
+	  _Error_Handler(__FILE__, __LINE__);
+  }
+
+  sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+	  _Error_Handler(__FILE__, __LINE__);
+  }
+
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = ADC_REGULAR_RANK_3;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+	  _Error_Handler(__FILE__, __LINE__);
   }
 }
 
@@ -693,15 +709,17 @@ void nrf(uint8_t argc, char **argv)
 			address[0] = strtoul(argv[1], 0, 16);
 		}
 
-		report(address);
-
+		report(address, false);
 	}
 }
 
 void adc(uint8_t argc, char **argv)
 {
-	uint32_t temp = getTemperature();
-	printf("temp: %dmC\n", (int)temp);
+	double temp, voltage;
+	sampleAnalog(temp, &voltage);
+	printf("temp: %f\n", temp);
+	printf("V0  : %f\n", voltage);
+	printf("E_T : %f\n", (100 * voltage) - 273);
 }
 
 
